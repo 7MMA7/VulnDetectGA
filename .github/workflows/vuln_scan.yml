@@ -1,33 +1,31 @@
+name: SonarCloud Proxy Scan
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ORG: ${{ secrets.SONAR_ORG }}
+      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+    
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.9'
+          
+      - name: Install Dependencies
+        run: pip install requests gitpython
 
-      - name: Install dependencies
-        run: pip install jsonlines requests gitpython
+      - name: Run Analysis Script
+        run: python scripts/scan_sonarcloud.py
 
-      - name: Run SonarCloud scan per commit
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
-          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
-        run: python scripts/scan_sonarcloud.py chunk_00.jsonl output.jsonl
-
-      - name: Upload results
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: sonar-results
-          path: output.jsonl
+          name: analysis-results
+          path: final_results.json
