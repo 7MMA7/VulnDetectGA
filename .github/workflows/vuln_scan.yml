@@ -172,4 +172,3 @@ jobs:
         with:
           name: sonar-analysis-results
           path: final_results.json
-
