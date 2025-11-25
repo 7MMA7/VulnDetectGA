@@ -39,19 +39,11 @@ def patch_file(file_path, func_code):
         new_content = content[:ins_point] + "\n" + func_code + "\n" + content[end_pos:]
         with open(file_path, 'w') as f: f.write(new_content)
         return True
-    except:
+    except Exception as e:
+        print(f"Error patching file {file_path}: {e}")
         return False
 
 def run_scanner(repo_path, branch_name):
-    bw_output = os.path.join(repo_path, "bw-output")
-    if os.path.exists(bw_output): shutil.rmtree(bw_output)
-    os.makedirs(bw_output)
-    build_cmd = ["tools/build-wrapper-linux-x86-64/build-wrapper-linux-x86-64", "--out-dir", bw_output, "make", "clean", "all"]
-    try:
-        subprocess.run(build_cmd, cwd=repo_path, check=True)
-    except subprocess.CalledProcessError:
-        print(f"Build wrapper failed for {branch_name}")
-        return False
     cmd = [
         "npx", "sonar-scanner",
         f"-Dsonar.organization={SONAR_ORG}",
@@ -60,51 +52,98 @@ def run_scanner(repo_path, branch_name):
         f"-Dsonar.host.url=https://sonarcloud.io",
         f"-Dsonar.login={SONAR_TOKEN}",
         f"-Dsonar.branch.name={branch_name}",
-        f"-Dsonar.cfamily.build-wrapper-output={bw_output}",
         "-Dsonar.scm.disabled=true",
-        "-Dsonar.cpd.exclusions=**/*"
+        "-Dsonar.cpd.exclusions=**/*",
+        "-Dsonar.c.file.suffixes=.c,.h",
+        "-Dsonar.cpp.file.suffixes=.cpp,.cxx,.cc,.hpp,.hxx"
     ]
     try:
-        subprocess.run(cmd, cwd=repo_path, check=True)
+        subprocess.run(cmd, cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
         return True
     except subprocess.CalledProcessError:
         print(f"Scanner failed for {branch_name}")
         return False
 
 def fetch_issues(branch_name, file_path):
-    time.sleep(10)
-    for _ in range(20):
-        r = requests.get(f"{SONAR_API_URL}/ce/component", params={"component": PROJECT_KEY, "branch": branch_name}, auth=(SONAR_TOKEN, ''))
+    time.sleep(5)
+    for _ in range(30):
+        r = requests.get(
+            f"{SONAR_API_URL}/ce/component", 
+            params={"component": PROJECT_KEY, "branch": branch_name}, 
+            auth=(SONAR_TOKEN, '')
+        )
         data = r.json()
-        if not data.get('queue') and not data.get('current'): break
+        if not data.get('queue') and not data.get('current'):
+            break
         time.sleep(5)
-    r = requests.get(f"{SONAR_API_URL}/issues/search", params={"componentKeys": PROJECT_KEY,"branch": branch_name,"types": "VULNERABILITY,BUG","ps": 100}, auth=(SONAR_TOKEN, ''))
+    r = requests.get(
+        f"{SONAR_API_URL}/issues/search", 
+        params={
+            "componentKeys": PROJECT_KEY,
+            "branch": branch_name,
+            "types": "VULNERABILITY,BUG",
+            "ps": 100
+        }, 
+        auth=(SONAR_TOKEN, '')
+    )
     issues = []
     if r.status_code == 200:
         for issue in r.json().get('issues', []):
             if os.path.basename(file_path) in issue['component']:
-                issues.append({"rule": issue['rule'], "message": issue['message'], "severity": issue['severity'], "line": issue.get('line')})
+                issues.append({
+                    "rule": issue['rule'], 
+                    "message": issue['message'], 
+                    "severity": issue['severity'], 
+                    "line": issue.get('line')
+                })
+    else:
+        print(f"Error fetching issues: {r.text}")
     return issues
 
 results = []
 if os.path.exists(WORKDIR): shutil.rmtree(WORKDIR)
 os.makedirs(WORKDIR)
 
-with open("chunk_00.jsonl", "r") as f:
+input_file = "chunk_00.jsonl"
+if not os.path.exists(input_file):
+    print(f"Error: {input_file} not found.")
+    exit(1)
+
+with open(input_file, "r") as f:
     for line in f:
-        entry = json.loads(line)
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         target_str = "vuln" if entry['target'] == 1 else "fixed"
         branch_name = f"analysis-{entry['idx']}-{target_str}"
         repo_dir = os.path.join(WORKDIR, branch_name)
-        if not os.path.exists(repo_dir): Repo.clone_from(entry['project_url'], repo_dir)
+        if not os.path.exists(repo_dir):
+            try:
+                Repo.clone_from(entry['project_url'], repo_dir)
+            except Exception as e:
+                print(f"Clone failed: {e}")
+                continue
         repo = Repo(repo_dir)
-        repo.git.reset('--hard')
-        repo.git.checkout(entry['commit_id'])
+        try:
+            repo.git.reset('--hard')
+            repo.git.checkout(entry['commit_id'])
+        except Exception as e:
+            print(f"Checkout failed: {e}")
+            shutil.rmtree(repo_dir)
+            continue
         full_path = os.path.join(repo_dir, entry['file_path'])
         if patch_file(full_path, entry['func']):
             if run_scanner(repo_dir, branch_name):
-                issues = fetch_issues(branch_name, entry['file_path'])
-                results.append({"idx": entry['idx'], "target": entry['target'], "branch": branch_name, "issues": issues})
-        shutil.rmtree(repo_dir)
+                found_issues = fetch_issues(branch_name, entry['file_path'])
+                results.append({
+                    "idx": entry['idx'], 
+                    "target": entry['target'], 
+                    "branch": branch_name, 
+                    "issues": found_issues
+                })
+        if os.path.exists(repo_dir):
+            shutil.rmtree(repo_dir)
 
-with open("final_results.json", "w") as f: json.dump(results, f, indent=2)
+with open("final_results.json", "w") as f:
+    json.dump(results, f, indent=2)
