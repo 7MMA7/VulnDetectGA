@@ -104,7 +104,7 @@ jobs:
 
           results = []
 
-          with open("dataset.jsonl", "r") as f:
+          with open("chunk_00.jsonl", "r") as f:
               for line in f:
                   entry = json.loads(line)
                   project_key = f"prj_{entry['idx']}_{entry['target']}"
@@ -172,3 +172,4 @@ jobs:
         with:
           name: sonar-analysis-results
           path: final_results.json
+
