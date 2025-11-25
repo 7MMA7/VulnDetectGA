@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.9'
           
-      - name: Install Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -30,9 +30,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install requests gitpython
 
-      - name: Run Analysis Script
-        # On suppose que le script python est à la racine, sinon ajustez le chemin
-        run: python run_analysis.py
+      - name: Run Analysis
+        run: python scripts/scan_sonarcloud.py
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
