@@ -10,37 +10,29 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_ORG: ${{ secrets.SONAR_ORGANIZATION }}
       SONAR_PROJECT_KEY: ${{ secrets.SONAR_KEYPROJECT }}
-    
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
-          python-version: "3.9"
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+          python-version: '3.9'
 
       - name: Install SonarScanner CLI
-        run: npm install -g sonar-scanner
+        run: |
+          wget -q https://github.com/SonarSource/sonar-scanner-cli/releases/download/v6.2.1.4610/sonar-scanner-6.2.1.4610-linux-x64.zip
+          unzip sonar-scanner-6.2.1.4610-linux-x64.zip
+          mv sonar-scanner-6.2.1.4610-linux-x64 sonar-scanner
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: pip install requests gitpython
 
       - name: Run Analysis Script
         run: python scripts/scan_sonarcloud.py
 
-      - name: Upload Results
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: analysis-results
-          path: final_results.json
-
-      - name: Upload Scanner Logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: scanner-logs
-          path: temp_workdir
+          name: results
+          path: |
+            final_results.json
+            scanner_logs
