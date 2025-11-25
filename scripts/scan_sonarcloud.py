@@ -1,81 +1,131 @@
-import os, sys, tempfile, shutil, time, jsonlines, requests
-from git import Repo
+import json
+import os
+import re
+import time
+import shutil
 import subprocess
+import requests
+from git import Repo
 
-SONAR_TOKEN = os.environ["SONAR_TOKEN"]
-SONAR_ORG = os.environ["SONAR_ORGANIZATION"]
-BASE_PROJECT_KEY = os.environ["SONAR_PROJECT_KEY"]
-API_URL = "https://sonarcloud.io/api"
+SONAR_TOKEN = os.environ.get("SONAR_TOKEN")
+SONAR_ORG = os.environ.get("SONAR_ORG")
+PROJECT_KEY = os.environ.get("SONAR_PROJECT_KEY")
+SONAR_API_URL = "https://sonarcloud.io/api"
+WORKDIR = "temp_workdir"
 
-def run(cmd, cwd=None):
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr)
-    return r.stdout
-
-def wait_for_ce(task_id):
-    url = f"{API_URL}/ce/task?id={task_id}"
-    for _ in range(40):
-        r = requests.get(url, auth=(SONAR_TOKEN, ""))
-        status = r.json()["task"]["status"]
-        if status in ["SUCCESS", "FAILED"]:
-            return status
-        time.sleep(2)
-    return "TIMEOUT"
-
-def extract_issue_fields(i):
-    return {
-        "rule": i.get("rule"),
-        "severity": i.get("severity"),
-        "message": i.get("message"),
-        "cwe": i.get("cwe"),
-        "cve": i.get("cve")
-    }
-
-def scan_commit(repo_url, commit_id):
-    tmp = tempfile.mkdtemp()
+def patch_file(file_path, func_code):
     try:
-        Repo.clone_from(repo_url, tmp, depth=1)
-        repo = Repo(tmp)
-        repo.git.fetch("origin", commit_id, depth=1)
-        repo.git.checkout(commit_id)
-
-        out = run([
-            "sonar-scanner",
-            f"-Dsonar.organization={SONAR_ORG}",
-            f"-Dsonar.projectKey={BASE_PROJECT_KEY}",
-            "-Dsonar.sources=.",
-            "-Dsonar.host.url=https://sonarcloud.io",
-            f"-Dsonar.login={SONAR_TOKEN}"
-        ], cwd=tmp)
-
-        task_id = None
-        for line in out.splitlines():
-            if "ce/task?id=" in line:
-                task_id = line.split("ce/task?id=")[1].strip()
+        with open(file_path, 'r', errors='ignore') as f: content = f.read()
+        match = re.search(r'(\w+\s+)+\**(\w+)\s*\(', func_code)
+        if not match: return False
+        func_name = match.group(2)
+        idx = content.find(func_name + "(")
+        if idx == -1: idx = content.find(func_name + " (")
+        if idx == -1: return False
+        pre = content[:idx]
+        last_brace = pre.rfind('}')
+        ins_point = last_brace + 1 if last_brace != -1 else 0
+        open_brace = content.find('{', idx)
+        if open_brace == -1: return False
+        count = 1
+        end_pos = -1
+        for i in range(open_brace + 1, len(content)):
+            if content[i] == '{': count += 1
+            elif content[i] == '}': count -= 1
+            if count == 0:
+                end_pos = i + 1
                 break
-        if not task_id:
-            return None, "scan"
+        if end_pos == -1: return False
+        new_content = content[:ins_point] + "\n" + func_code + "\n" + content[end_pos:]
+        with open(file_path, 'w') as f: f.write(new_content)
+        return True
+    except Exception as e:
+        print(f"Patch error: {e}")
+        return False
 
-        status = wait_for_ce(task_id)
-        if status != "SUCCESS":
-            return None, "scan"
+def run_scanner(repo_path, branch_name):
+    cmd = [
+        "npx", "sonar-scanner",
+        f"-Dsonar.organization={SONAR_ORG}",
+        f"-Dsonar.projectKey={PROJECT_KEY}",
+        f"-Dsonar.sources=.",
+        f"-Dsonar.host.url=https://sonarcloud.io",
+        f"-Dsonar.token={SONAR_TOKEN}",
+        f"-Dsonar.branch.name={branch_name}",
+        "-Dsonar.scm.disabled=true",
+        "-Dsonar.cpd.exclusions=**/*",
+        "-Dsonar.c.file.suffixes=.c,.h",
+        "-Dsonar.cpp.file.suffixes=.cpp,.hpp"
+    ]
+    try:
+        subprocess.run(cmd, cwd=repo_path, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError:
+        print(f"Scanner failed for {branch_name}")
+        return False
 
-        r = requests.get(f"{API_URL}/issues/search?componentKeys={BASE_PROJECT_KEY}&types=VULNERABILITY", auth=(SONAR_TOKEN,""))
-        issues = r.json().get("issues", [])
-        return [extract_issue_fields(i) for i in issues], None
-    finally:
-        shutil.rmtree(tmp)
+def fetch_issues(branch_name, file_path):
+    print(f"Waiting for processing on branch {branch_name}...")
+    time.sleep(10)
+    for _ in range(20):
+        r = requests.get(
+            f"{SONAR_API_URL}/ce/component", 
+            params={"component": PROJECT_KEY, "branch": branch_name}, 
+            auth=(SONAR_TOKEN, '')
+        )
+        data = r.json()
+        if not data.get('queue') and not data.get('current'):
+            break
+        time.sleep(5)
+    r = requests.get(
+        f"{SONAR_API_URL}/issues/search",
+        params={
+            "componentKeys": PROJECT_KEY,
+            "branch": branch_name,
+            "types": "VULNERABILITY,BUG",
+            "ps": 100
+        },
+        auth=(SONAR_TOKEN, '')
+    )
+    issues = []
+    if r.status_code == 200:
+        for issue in r.json().get('issues', []):
+            if os.path.basename(file_path) in issue['component']:
+                issues.append({
+                    "rule": issue['rule'],
+                    "message": issue['message'],
+                    "severity": issue['severity'],
+                    "line": issue.get('line')
+                })
+    return issues
 
-def main(in_file, out_file):
-    with jsonlines.open(in_file) as reader, jsonlines.open(out_file, "w") as writer:
-        for entry in reader:
-            idx = entry["idx"]
-            try:
-                issues, err = scan_commit(entry["project_url"], entry["commit_id"])
-                writer.write({"idx": idx, "issues": issues, "error": err})
-            except Exception as e:
-                writer.write({"idx": idx, "issues": None, "error": str(e)})
+results = []
+if os.path.exists(WORKDIR): shutil.rmtree(WORKDIR)
+os.makedirs(WORKDIR)
 
-if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+with open("dataset.jsonl", "r") as f:
+    for line in f:
+        entry = json.loads(line)
+        target_str = "vuln" if entry['target'] == 1 else "fixed"
+        branch_name = f"analysis-{entry['idx']}-{target_str}"
+        print(f"--- Processing {branch_name} ---")
+        repo_dir = os.path.join(WORKDIR, branch_name)
+        if not os.path.exists(repo_dir):
+            Repo.clone_from(entry['project_url'], repo_dir)
+        repo = Repo(repo_dir)
+        repo.git.reset('--hard')
+        repo.git.checkout(entry['commit_id'])
+        full_path = os.path.join(repo_dir, entry['file_path'])
+        if patch_file(full_path, entry['func']):
+            if run_scanner(repo_dir, branch_name):
+                issues = fetch_issues(branch_name, entry['file_path'])
+                results.append({
+                    "idx": entry['idx'],
+                    "target": entry['target'],
+                    "branch": branch_name,
+                    "issues": issues
+                })
+        shutil.rmtree(repo_dir)
+
+with open("final_results.json", "w") as f:
+    json.dump(results, f, indent=2)
