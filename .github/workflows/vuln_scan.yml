@@ -1,4 +1,5 @@
 name: SonarCloud Proxy Scan
+
 on:
   workflow_dispatch:
 
@@ -17,8 +18,16 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-          
-      - name: Install Dependencies
+
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install SonarScanner CLI
+        run: npm install -g sonar-scanner
+
+      - name: Install Python dependencies
         run: pip install requests gitpython
 
       - name: Run Analysis Script
