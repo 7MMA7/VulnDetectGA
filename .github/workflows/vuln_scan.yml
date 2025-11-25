@@ -2,37 +2,49 @@ name: Vulnerability Benchmarker
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   analyze-vulns:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: setup python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: "3.9"
 
-      - name: Install Dependencies
+      - name: install deps
         run: |
           pip install requests gitpython
+          sudo apt-get update
+          sudo apt-get install -y unzip
 
-      - name: Run Patch Script
+      - name: install sonar-scanner
         run: |
-          cat <<EOF > script.py
-          import json
-          import os
-          import re
-          import time
-          import subprocess
-          import requests
-          import shutil
+          SCANNER_ZIP=sonar-scanner-cli-7.0.2.4839-linux-x64.zip
+          wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/${SCANNER_ZIP}
+          unzip -q ${SCANNER_ZIP}
+          mv sonar-scanner-7.0.2.4839-linux-x64 sonar-scanner
+          echo "$PWD/sonar-scanner/bin" >> $GITHUB_PATH
+
+      - name: run patch+scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        run: |
+          cat <<'PY' > script.py
+          import json, os, re, time, subprocess, requests, shutil
           from git import Repo
 
+          SONAR_TOKEN = os.environ["SONAR_TOKEN"]
+          SONAR_ORG = os.environ.get("SONAR_ORGANIZATION", "")
+          SONAR_HOST = os.environ.get("https://sonarcloud.io")
           WORKDIR = "workdir"
           os.makedirs(WORKDIR, exist_ok=True)
 
@@ -40,57 +52,111 @@ jobs:
               try:
                   with open(file_path, 'r', errors='ignore') as f:
                       content = f.read()
-                  match = re.search(r'(\\w+\\s+)+\\**(\\w+)\\s*\\(', func_code)
-                  if not match: return False
-                  func_name = match.group(2)
-                  idx = content.find(func_name + "(")
-                  if idx == -1: idx = content.find(func_name + " (")
+                  m = re.search(r'(\w+\s+)+\**(\w+)\s*\(', func_code)
+                  if not m: return False
+                  fname = m.group(2)
+                  idx = content.find(fname + "(")
+                  if idx == -1: idx = content.find(fname + " (")
                   if idx == -1: return False
                   pre = content[:idx]
                   last_brace = pre.rfind('}')
-                  insertion_point = last_brace + 1 if last_brace != -1 else 0
+                  insertion = last_brace + 1 if last_brace != -1 else 0
                   open_brace = content.find('{', idx)
+                  if open_brace == -1: return False
                   count = 1
                   end_pos = -1
-                  for i in range(open_brace + 1, len(content)):
+                  for i in range(open_brace+1, len(content)):
                       if content[i] == '{': count += 1
                       elif content[i] == '}': count -= 1
-                      if count == 0: end_pos = i + 1; break
+                      if count == 0:
+                          end_pos = i+1
+                          break
                   if end_pos == -1: return False
-                  new_content = content[:insertion_point] + "\\n" + func_code + "\\n" + content[end_pos:]
-                  with open(file_path, 'w') as f: f.write(new_content)
+                  new = content[:insertion] + "\n" + func_code + "\n" + content[end_pos:]
+                  with open(file_path, 'w') as f: f.write(new)
                   return True
-              except: return False
+              except Exception as e:
+                  print("patch error", e)
+                  return False
 
           results = []
-          with open("chunk_00.jsonl", "r") as f:
-              for line in f:
+
+          with open("chunk_00.jsonl", "r") as fh:
+              for line in fh:
                   entry = json.loads(line)
-                  project_key = f"prj_{entry['idx']}_{entry['target']}"
-                  repo_path = os.path.join(WORKDIR, project_key)
+                  key = f"prj_{entry['idx']}_{entry['target']}"
+                  repo_path = os.path.join(WORKDIR, key)
                   if os.path.exists(repo_path): shutil.rmtree(repo_path)
-                  repo = Repo.clone_from(entry["project_url"], repo_path)
-                  repo.git.checkout(entry["commit_id"])
-                  if not patch_file(os.path.join(repo_path, entry["file_path"]), entry["func"]): continue
-                  results.append({"idx": entry["idx"], "target": entry["target"], "repo_path": repo_path})
-          with open("patched_repos.json", "w") as f: json.dump(results, f)
-          EOF
+                  try:
+                      repo = Repo.clone_from(entry["project_url"], repo_path)
+                      repo.git.checkout(entry["commit_id"])
+                  except Exception as e:
+                      print("git error", key, e)
+                      results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": None, "error": "git"})
+                      continue
+                  fp = os.path.join(repo_path, entry["file_path"])
+                  if not patch_file(fp, entry["func"]):
+                      results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": None, "error": "patch"})
+                      continue
+                  cmd = [
+                      "sonar-scanner",
+                      f"-Dsonar.projectKey={key}",
+                      "-Dsonar.sources=.",
+                      f"-Dsonar.host.url={SONAR_HOST}",
+                      f"-Dsonar.login={SONAR_TOKEN}"
+                  ]
+                  if SONAR_ORG:
+                      cmd.append(f"-Dsonar.organization={SONAR_ORG}")
+                  try:
+                      subprocess.run(cmd, cwd=repo_path, check=True)
+                  except subprocess.CalledProcessError as e:
+                      print("scanner error", key, e)
+                      results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": None, "error": "scan"})
+                      continue
+                  timeout = 600
+                  waited = 0
+                  while True:
+                      try:
+                          r = requests.get(f"{SONAR_HOST}/api/ce/component", params={"component": key}, auth=(SONAR_TOKEN, ""))
+                      except Exception as e:
+                          time.sleep(3); waited += 3
+                          if waited > timeout: break
+                          continue
+                      if r.status_code != 200:
+                          time.sleep(3); waited += 3
+                          if waited > timeout: break
+                          continue
+                      try:
+                          data = r.json()
+                      except Exception:
+                          time.sleep(3); waited += 3
+                          if waited > timeout: break
+                          continue
+                      queue = data.get("queue", [])
+                      current = data.get("current")
+                      if not queue and not current:
+                          break
+                      time.sleep(1); waited += 1
+                      if waited > timeout: break
+                  try:
+                      ir = requests.get(f"{SONAR_HOST}/api/issues/search", params={"componentKeys": key, "types": "VULNERABILITY"}, auth=(SONAR_TOKEN, ""))
+                      if ir.status_code == 200:
+                          issues = ir.json().get("issues", [])
+                          count = len(issues)
+                      else:
+                          count = None
+                  except Exception:
+                      count = None
+                  results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": count})
+          with open("final_results.json", "w") as outf:
+              json.dump(results, outf)
+          print("done")
+          PY
 
           python script.py
 
-      - name: Run SonarQube Analysis
-        uses: sonarsource/sonarcloud-github-action@master
-        with:
-          projectBaseDir: .
-          extraProperties: |
-            sonar.projectKey=VulnDetectGA
-            sonar.organization=my-org
-            sonar.sources=.
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-      - name: Upload Results
+      - name: upload results
         uses: actions/upload-artifact@v4
         with:
-          name: patched-results
-          path: patched_repos.json
+          name: sonar-analysis-results
+          path: final_results.json
