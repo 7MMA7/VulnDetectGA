@@ -3,16 +3,10 @@ name: Vulnerability Benchmarker
 on:
   push:
     branches: [main]
+
 jobs:
   analyze-vulns:
     runs-on: ubuntu-latest
-
-    services:
-      sonarqube:
-        image: sonarqube:community
-        ports:
-          - 9000:9000
-        options: --health-cmd="curl -f http://localhost:9000/api/system/status || exit 1" --health-interval=10s --health-timeout=5s --health-retries=20
 
     steps:
       - name: Checkout code
@@ -26,35 +20,8 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install requests gitpython
-          sudo apt-get update
-          sudo apt-get install -y unzip
 
-      - name: Install Sonar Scanner
-        run: |
-          wget https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
-          unzip sonar-scanner-cli-5.0.1.3006-linux.zip
-          mv sonar-scanner-5.0.1.3006-linux sonar-scanner
-          echo "$PWD/sonar-scanner/bin" >> $GITHUB_PATH
-
-      - name: Wait for SonarQube
-        run: |
-          echo "Waiting for SonarQube..."
-          until [[ "$(curl -s -u admin:admin http://localhost:9000/api/system/status | grep -o '"status":"UP"')" != "" ]]; do
-            sleep 5
-            echo "Still waiting..."
-          done
-          echo "SonarQube is UP!"
-
-      - name: Configure SonarQube Auth
-        id: sonar-auth
-        run: |
-          curl -u admin:admin -X POST "http://localhost:9000/api/users/change_password?login=admin&previousPassword=admin&password=securepass"
-          TOKEN=$(curl -u admin:securepass -X POST "http://localhost:9000/api/user_tokens/generate?name=ci-token" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-          echo "SONAR_TOKEN=$TOKEN" >> $GITHUB_ENV
-
-      - name: Run Analysis Script
-        env:
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+      - name: Run Patch Script
         run: |
           cat <<EOF > script.py
           import json
@@ -66,10 +33,7 @@ jobs:
           import shutil
           from git import Repo
 
-          SONAR_URL = "http://localhost:9000"
-          SONAR_TOKEN = os.environ["SONAR_TOKEN"]
           WORKDIR = "workdir"
-
           os.makedirs(WORKDIR, exist_ok=True)
 
           def patch_file(file_path, func_code):
@@ -91,84 +55,42 @@ jobs:
                   for i in range(open_brace + 1, len(content)):
                       if content[i] == '{': count += 1
                       elif content[i] == '}': count -= 1
-                      if count == 0:
-                          end_pos = i + 1
-                          break
+                      if count == 0: end_pos = i + 1; break
                   if end_pos == -1: return False
-                  new_content = content[:insertion_point] + "\n" + func_code + "\n" + content[end_pos:]
+                  new_content = content[:insertion_point] + "\\n" + func_code + "\\n" + content[end_pos:]
                   with open(file_path, 'w') as f: f.write(new_content)
                   return True
-              except Exception as e:
-                  print(f"Error patching: {e}")
-                  return False
+              except: return False
 
           results = []
-
           with open("chunk_00.jsonl", "r") as f:
               for line in f:
                   entry = json.loads(line)
                   project_key = f"prj_{entry['idx']}_{entry['target']}"
-                  print(f"Processing {project_key}...")
-
                   repo_path = os.path.join(WORKDIR, project_key)
                   if os.path.exists(repo_path): shutil.rmtree(repo_path)
                   repo = Repo.clone_from(entry["project_url"], repo_path)
                   repo.git.checkout(entry["commit_id"])
-
-                  patched = patch_file(os.path.join(repo_path, entry["file_path"]), entry["func"])
-                  if not patched:
-                      print("Patch failed for", project_key)
-                      continue
-
-                  cmd = [
-                      "sonar-scanner",
-                      f"-Dsonar.projectKey={project_key}",
-                      "-Dsonar.sources=.",
-                      f"-Dsonar.host.url={SONAR_URL}",
-                      f"-Dsonar.login={SONAR_TOKEN}",
-                      "-Dsonar.scm.disabled=true",
-                      "-Dsonar.c.file.suffixes=.c,.h",
-                      "-Dsonar.cpp.file.suffixes=.cpp,.hpp"
-                  ]
-                  subprocess.run(cmd, cwd=repo_path)
-
-                  while True:
-                      r = requests.get(f"{SONAR_URL}/api/ce/component", params={"component": project_key}, auth=(SONAR_TOKEN, ""))
-                      if r.status_code != 200:
-                          print(f"Warning: status code {r.status_code}, retrying in 3s")
-                          time.sleep(3)
-                          continue
-                      try:
-                          data = r.json()
-                      except json.JSONDecodeError:
-                          print("Warning: could not decode JSON, retrying in 3s")
-                          time.sleep(3)
-                          continue
-                      queue = data.get("queue", [])
-                      current = data.get("current")
-                      if not queue and not current: break
-                      print("CE status:", {"queue": queue, "current": current})
-                      time.sleep(1)
-
-                  issues_r = requests.get(f"{SONAR_URL}/api/issues/search", params={"componentKeys": project_key, "types": "VULNERABILITY"}, auth=(SONAR_TOKEN, ""))
-                  if issues_r.status_code != 200:
-                      print(f"Error fetching issues for {project_key}: HTTP {issues_r.status_code}")
-                      issue_count = None
-                  else:
-                      issues_json = issues_r.json()
-                      issue_count = len(issues_json.get("issues", []))
-
-                  results.append({"idx": entry["idx"], "target": entry["target"], "issues": issue_count})
-
-          with open("final_results.json", "w") as f:
-              json.dump(results, f)
-
+                  if not patch_file(os.path.join(repo_path, entry["file_path"]), entry["func"]): continue
+                  results.append({"idx": entry["idx"], "target": entry["target"], "repo_path": repo_path})
+          with open("patched_repos.json", "w") as f: json.dump(results, f)
           EOF
 
           python script.py
 
+      - name: Run SonarQube Analysis
+        uses: sonarsource/sonarcloud-github-action@master
+        with:
+          projectBaseDir: .
+          extraProperties: |
+            sonar.projectKey=VulnDetectGA
+            sonar.organization=my-org
+            sonar.sources=.
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: sonar-analysis-results
-          path: final_results.json
+          name: patched-results
+          path: patched_repos.json
