@@ -103,7 +103,7 @@ results = []
 if os.path.exists(WORKDIR): shutil.rmtree(WORKDIR)
 os.makedirs(WORKDIR)
 
-with open("dataset.jsonl", "r") as f:
+with open("chunk_00.jsonl", "r") as f:
     for line in f:
         entry = json.loads(line)
         target_str = "vuln" if entry['target'] == 1 else "fixed"
