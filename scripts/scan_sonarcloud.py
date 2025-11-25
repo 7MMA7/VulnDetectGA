@@ -98,4 +98,11 @@ with open("chunk_00.jsonl","r") as f:
         repo=Repo(repo_dir)
         try: repo.git.reset('--hard'); repo.git.checkout(entry['commit_id'])
         except: continue
-        full_path=os.path.join(repo_dir, entry['fi]()
+        full_path=os.path.join(repo_dir, entry['file_path'])
+        if patch_file(full_path, entry['func']):
+            generate_compile_commands(repo_dir, entry['file_path'])
+            if run_scanner(repo_dir, branch_name):
+                issues=fetch_issues(branch_name, entry['file_path'])
+                results.append({"idx":entry['idx'],"target":entry['target'],"branch":branch_name,"issues":issues})
+        if os.path.exists(repo_dir): shutil.rmtree(repo_dir)
+with open("final_results.json","w") as f: json.dump(results,f,indent=2)
