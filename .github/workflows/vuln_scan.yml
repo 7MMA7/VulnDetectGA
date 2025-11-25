@@ -1,162 +1,35 @@
 name: Vulnerability Benchmarker
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
 
 jobs:
-  analyze-vulns:
+  scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: setup python
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.11"
 
-      - name: install deps
-        run: |
-          pip install requests gitpython
-          sudo apt-get update
-          sudo apt-get install -y unzip
+      - name: Install Python packages
+        run: pip install jsonlines requests
 
-      - name: install sonar-scanner
-        run: |
-          SCANNER_ZIP=sonar-scanner-cli-7.0.2.4839-linux-x64.zip
-          wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/${SCANNER_ZIP}
-          unzip -q ${SCANNER_ZIP}
-          mv sonar-scanner-7.0.2.4839-linux-x64 sonar-scanner
-          echo "$PWD/sonar-scanner/bin" >> $GITHUB_PATH
-
-      - name: run patch+scan
+      - name: Run SonarCloud scan
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
-        run: |
-          cat <<'PY' > script.py
-          import json, os, re, time, subprocess, requests, shutil
-          from git import Repo
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: python scripts/scan_sonarcloud.py chunk_00.jsonl output.jsonl
 
-          SONAR_TOKEN = os.environ["SONAR_TOKEN"]
-          SONAR_ORG = os.environ.get("SONAR_ORGANIZATION", "")
-          SONAR_HOST = os.environ.get("https://sonarcloud.io")
-          WORKDIR = "workdir"
-          os.makedirs(WORKDIR, exist_ok=True)
-
-          def patch_file(file_path, func_code):
-              try:
-                  with open(file_path, 'r', errors='ignore') as f:
-                      content = f.read()
-                  m = re.search(r'(\w+\s+)+\**(\w+)\s*\(', func_code)
-                  if not m: return False
-                  fname = m.group(2)
-                  idx = content.find(fname + "(")
-                  if idx == -1: idx = content.find(fname + " (")
-                  if idx == -1: return False
-                  pre = content[:idx]
-                  last_brace = pre.rfind('}')
-                  insertion = last_brace + 1 if last_brace != -1 else 0
-                  open_brace = content.find('{', idx)
-                  if open_brace == -1: return False
-                  count = 1
-                  end_pos = -1
-                  for i in range(open_brace+1, len(content)):
-                      if content[i] == '{': count += 1
-                      elif content[i] == '}': count -= 1
-                      if count == 0:
-                          end_pos = i+1
-                          break
-                  if end_pos == -1: return False
-                  new = content[:insertion] + "\n" + func_code + "\n" + content[end_pos:]
-                  with open(file_path, 'w') as f: f.write(new)
-                  return True
-              except Exception as e:
-                  print("patch error", e)
-                  return False
-
-          results = []
-
-          with open("chunk_00.jsonl", "r") as fh:
-              for line in fh:
-                  entry = json.loads(line)
-                  key = f"prj_{entry['idx']}_{entry['target']}"
-                  repo_path = os.path.join(WORKDIR, key)
-                  if os.path.exists(repo_path): shutil.rmtree(repo_path)
-                  try:
-                      repo = Repo.clone_from(entry["project_url"], repo_path)
-                      repo.git.checkout(entry["commit_id"])
-                  except Exception as e:
-                      print("git error", key, e)
-                      results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": None, "error": "git"})
-                      continue
-                  fp = os.path.join(repo_path, entry["file_path"])
-                  if not patch_file(fp, entry["func"]):
-                      results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": None, "error": "patch"})
-                      continue
-                  cmd = [
-                      "sonar-scanner",
-                      f"-Dsonar.projectKey={key}",
-                      "-Dsonar.sources=.",
-                      f"-Dsonar.host.url={SONAR_HOST}",
-                      f"-Dsonar.login={SONAR_TOKEN}"
-                  ]
-                  if SONAR_ORG:
-                      cmd.append(f"-Dsonar.organization={SONAR_ORG}")
-                  try:
-                      subprocess.run(cmd, cwd=repo_path, check=True)
-                  except subprocess.CalledProcessError as e:
-                      print("scanner error", key, e)
-                      results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": None, "error": "scan"})
-                      continue
-                  timeout = 600
-                  waited = 0
-                  while True:
-                      try:
-                          r = requests.get(f"{SONAR_HOST}/api/ce/component", params={"component": key}, auth=(SONAR_TOKEN, ""))
-                      except Exception as e:
-                          time.sleep(3); waited += 3
-                          if waited > timeout: break
-                          continue
-                      if r.status_code != 200:
-                          time.sleep(3); waited += 3
-                          if waited > timeout: break
-                          continue
-                      try:
-                          data = r.json()
-                      except Exception:
-                          time.sleep(3); waited += 3
-                          if waited > timeout: break
-                          continue
-                      queue = data.get("queue", [])
-                      current = data.get("current")
-                      if not queue and not current:
-                          break
-                      time.sleep(1); waited += 1
-                      if waited > timeout: break
-                  try:
-                      ir = requests.get(f"{SONAR_HOST}/api/issues/search", params={"componentKeys": key, "types": "VULNERABILITY"}, auth=(SONAR_TOKEN, ""))
-                      if ir.status_code == 200:
-                          issues = ir.json().get("issues", [])
-                          count = len(issues)
-                      else:
-                          count = None
-                  except Exception:
-                      count = None
-                  results.append({"idx": entry.get("idx"), "target": entry.get("target"), "issues": count})
-          with open("final_results.json", "w") as outf:
-              json.dump(results, outf)
-          print("done")
-          PY
-
-          python script.py
-
-      - name: upload results
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: sonar-analysis-results
-          path: final_results.json
+          name: sonar-results
+          path: output.jsonl
