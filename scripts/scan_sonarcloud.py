@@ -58,7 +58,7 @@ def run_scanner(repo_path, branch_name):
         "-Dsonar.cpp.file.suffixes=.cpp,.hpp"
     ]
     try:
-        subprocess.run(cmd, cwd=repo_path, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(cmd, cwd=repo_path, check=True)
         return True
     except subprocess.CalledProcessError:
         print(f"Scanner failed for {branch_name}")
