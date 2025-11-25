@@ -8,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      SONAR_ORG: ${{ secrets.SONAR_ORG }}
-      SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+      SONAR_ORG: ${{ secrets.SONAR_ORGANIZATION }}
+      SONAR_PROJECT_KEY: ${{ secrets.SONAR_KEYPROJECT }}
     
     steps:
       - uses: actions/checkout@v4
@@ -38,3 +38,4 @@ jobs:
         with:
           name: analysis-results
           path: final_results.json
+
