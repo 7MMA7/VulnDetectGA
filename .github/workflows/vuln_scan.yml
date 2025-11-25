@@ -13,29 +13,26 @@ jobs:
     
     steps:
       - uses: actions/checkout@v4
-      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
       - name: Install Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '20'
-
       - name: Install SonarScanner CLI
         run: npm install -g sonar-scanner
-
       - name: Install Python dependencies
         run: pip install requests gitpython
-
+      - name: Install Build Wrapper
+        run: |
+          wget https://binaries.sonarsource.com/Distribution/build-wrapper/build-wrapper-linux-x86-64.zip
+          unzip build-wrapper-linux-x86-64.zip -d tools
       - name: Run Analysis Script
         run: python scripts/scan_sonarcloud.py
-
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
           name: analysis-results
           path: final_results.json
-
