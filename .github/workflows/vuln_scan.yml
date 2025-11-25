@@ -1,5 +1,3 @@
-name: Vulnerability Benchmarker
-
 on:
   workflow_dispatch:
   push:
@@ -18,17 +16,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python packages
-        run: pip install jsonlines requests
+      - name: Install dependencies
+        run: pip install jsonlines requests gitpython
 
-      - name: Run SonarCloud scan
-        uses: SonarSource/sonarqube-scan-action@v5
-        with:
-          organization: ${{ secrets.SONAR_ORGANIZATION }}
-          projectKey: ${{ secrets.SONAR_PROJECT_KEY }}
-          token: ${{ secrets.SONAR_TOKEN }}
-
-      - name: Run scan script
+      - name: Run SonarCloud scan per commit
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
