@@ -66,12 +66,14 @@ def generate_compile_commands(repo_path):
     with open(json_path, "w") as f: json.dump(commands, f, indent=2)
     return json_path
 
-def run_scanner(repo_path, branch_name):
+def run_scanner(repo_path, branch_name, source_dir):
+    print(f"Running scanner on directory: {source_dir}")
+    
     cmd = [
         "npx", "sonar-scanner",
         f"-Dsonar.organization={SONAR_ORG}",
         f"-Dsonar.projectKey={PROJECT_KEY}",
-        f"-Dsonar.sources=.",
+        f"-Dsonar.sources={source_dir}", 
         f"-Dsonar.host.url=https://sonarcloud.io",
         f"-Dsonar.token={SONAR_TOKEN}",
         f"-Dsonar.branch.name={branch_name}",
@@ -83,26 +85,49 @@ def run_scanner(repo_path, branch_name):
         "-Dsonar.cpp.file.suffixes=.cpp,.hpp,.cc"
     ]
     try:
-        subprocess.run(cmd, cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(cmd, cwd=repo_path, check=True) 
         return True
     except subprocess.CalledProcessError:
         print(f"Scanner failed for {branch_name}")
         return False
 
-def fetch_issues(branch_name, file_path):
+def fetch_issues(branch_name):
     print(f"Waiting for results on {branch_name}...")
     time.sleep(5)
     for _ in range(30):
         r = requests.get(f"{SONAR_API_URL}/ce/component", params={"component": PROJECT_KEY, "branch": branch_name}, auth=(SONAR_TOKEN, ''))
-        data = r.json()
-        if not data.get('queue') and not data.get('current'): break
+        try:
+            data = r.json()
+            if not data.get('queue') and not data.get('current'): break
+        except:
+            pass
         time.sleep(5)
-    r = requests.get(f"{SONAR_API_URL}/issues/search", params={"componentKeys": PROJECT_KEY,"branch": branch_name,"types": "VULNERABILITY,BUG","ps": 100}, auth=(SONAR_TOKEN, ''))
+        
+    r = requests.get(
+        f"{SONAR_API_URL}/issues/search", 
+        params={
+            "componentKeys": PROJECT_KEY,
+            "branch": branch_name,
+            "types": "VULNERABILITY,BUG,SECURITY_HOTSPOT,CODE_SMELL",
+            "ps": 500
+        }, 
+        auth=(SONAR_TOKEN, '')
+    )
+    
     issues = []
     if r.status_code == 200:
-        for issue in r.json().get('issues', []):
-            if os.path.basename(file_path) in issue['component']:
-                issues.append({"rule": issue['rule'], "message": issue['message'], "severity": issue['severity'], "line": issue.get('line')})
+        found_issues = r.json().get('issues', [])
+        for issue in found_issues:
+            issues.append({
+                "rule": issue['rule'], 
+                "message": issue['message'], 
+                "severity": issue['severity'], 
+                "component": issue['component'],
+                "line": issue.get('line')
+            })
+    else:
+        print(f"API Error: {r.status_code} - {r.text}")
+        
     return issues
 
 results = []
@@ -122,20 +147,37 @@ with open(input_file, "r") as f:
         branch_name = f"analysis-{entry['idx']}-{target_str}"
         print(f"--- Processing {branch_name} ---")
         repo_dir = os.path.join(WORKDIR, branch_name)
+        
         if not os.path.exists(repo_dir):
             try: Repo.clone_from(entry['project_url'], repo_dir)
-            except: continue
+            except Exception as e: 
+                print(f"Clone error: {e}")
+                continue
+                
         repo = Repo(repo_dir)
         try:
             repo.git.reset('--hard')
             repo.git.checkout(entry['commit_id'])
-        except: continue
+        except Exception as e:
+            print(f"Checkout error: {e}")
+            continue
+            
         full_path = os.path.join(repo_dir, entry['file_path'])
+        source_dir = os.path.dirname(entry['file_path'])
+        if not source_dir: source_dir = "." # Si à la racine
+
         if patch_file(full_path, entry['func']):
             generate_compile_commands(repo_dir)
-            if run_scanner(repo_dir, branch_name):
-                issues = fetch_issues(branch_name, entry['file_path'])
-                results.append({"idx": entry['idx'], "target": entry['target'], "branch": branch_name, "issues": issues})
+            if run_scanner(repo_dir, branch_name, source_dir):
+                issues = fetch_issues(branch_name)
+                results.append({
+                    "idx": entry['idx'], 
+                    "target": entry['target'], 
+                    "branch": branch_name, 
+                    "scanned_dir": source_dir,
+                    "issues": issues
+                })
+        
         if os.path.exists(repo_dir): shutil.rmtree(repo_dir)
 
 with open("final_results.json", "w") as f: json.dump(results, f, indent=2)
