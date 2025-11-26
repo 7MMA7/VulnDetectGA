@@ -15,29 +15,38 @@ WORKDIR = "temp_workdir"
 
 def patch_file(file_path, func_code):
     try:
-        with open(file_path, 'r', errors='ignore') as f: content = f.read()
+        with open(file_path, 'r', errors='ignore') as f:
+            content = f.read()
         match = re.search(r'(\w+\s+)+\**(\w+)\s*\(', func_code)
-        if not match: return False
+        if not match:
+            return False
         func_name = match.group(2)
         idx = content.find(func_name + "(")
-        if idx == -1: idx = content.find(func_name + " (")
-        if idx == -1: return False
+        if idx == -1:
+            idx = content.find(func_name + " (")
+        if idx == -1:
+            return False
         pre = content[:idx]
         last_brace = pre.rfind('}')
         ins_point = last_brace + 1 if last_brace != -1 else 0
         open_brace = content.find('{', idx)
-        if open_brace == -1: return False
+        if open_brace == -1:
+            return False
         count = 1
         end_pos = -1
         for i in range(open_brace + 1, len(content)):
-            if content[i] == '{': count += 1
-            elif content[i] == '}': count -= 1
+            if content[i] == '{':
+                count += 1
+            elif content[i] == '}':
+                count -= 1
             if count == 0:
                 end_pos = i + 1
                 break
-        if end_pos == -1: return False
+        if end_pos == -1:
+            return False
         new_content = content[:ins_point] + "\n" + func_code + "\n" + content[end_pos:]
-        with open(file_path, 'w') as f: f.write(new_content)
+        with open(file_path, 'w') as f:
+            f.write(new_content)
         return True
     except Exception as e:
         print(f"Patch error: {e}")
@@ -63,17 +72,17 @@ def generate_compile_commands(repo_path):
             "file": abs_src
         })
     json_path = os.path.join(repo_path, "compile_commands.json")
-    with open(json_path, "w") as f: json.dump(commands, f, indent=2)
+    with open(json_path, "w") as f:
+        json.dump(commands, f, indent=2)
     return json_path
 
 def run_scanner(repo_path, branch_name, source_dir):
     print(f"Running scanner on directory: {source_dir}")
-    
     cmd = [
         "npx", "sonar-scanner",
         f"-Dsonar.organization={SONAR_ORG}",
         f"-Dsonar.projectKey={PROJECT_KEY}",
-        f"-Dsonar.sources={source_dir}", 
+        f"-Dsonar.sources={source_dir}",
         f"-Dsonar.host.url=https://sonarcloud.io",
         f"-Dsonar.token={SONAR_TOKEN}",
         f"-Dsonar.branch.name={branch_name}",
@@ -85,7 +94,7 @@ def run_scanner(repo_path, branch_name, source_dir):
         "-Dsonar.cpp.file.suffixes=.cpp,.hpp,.cc"
     ]
     try:
-        subprocess.run(cmd, cwd=repo_path, check=True) 
+        subprocess.run(cmd, cwd=repo_path, check=True)
         return True
     except subprocess.CalledProcessError:
         print(f"Scanner failed for {branch_name}")
@@ -94,44 +103,70 @@ def run_scanner(repo_path, branch_name, source_dir):
 def fetch_issues(branch_name):
     print(f"Waiting for results on {branch_name}...")
     time.sleep(5)
-    for _ in range(30):
-        r = requests.get(f"{SONAR_API_URL}/ce/component", params={"component": PROJECT_KEY, "branch": branch_name}, auth=(SONAR_TOKEN, ''))
+    for _ in range(40):
+        r = requests.get(
+            f"{SONAR_API_URL}/ce/component",
+            params={"component": PROJECT_KEY, "branch": branch_name},
+            auth=(SONAR_TOKEN, '')
+        )
         try:
             data = r.json()
-            if not data.get('queue') and not data.get('current'): break
+            if not data.get('queue') and not data.get('current'):
+                break
         except:
             pass
         time.sleep(5)
-        
-    r = requests.get(
-        f"{SONAR_API_URL}/issues/search", 
+    all_findings = []
+    r_issues = requests.get(
+        f"{SONAR_API_URL}/issues/search",
         params={
             "componentKeys": PROJECT_KEY,
             "branch": branch_name,
-            "types": "VULNERABILITY,BUG,SECURITY_HOTSPOT,CODE_SMELL",
+            "types": "VULNERABILITY,BUG,CODE_SMELL",
             "ps": 500
-        }, 
+        },
         auth=(SONAR_TOKEN, '')
     )
-    
-    issues = []
-    if r.status_code == 200:
-        found_issues = r.json().get('issues', [])
-        for issue in found_issues:
-            issues.append({
-                "rule": issue['rule'], 
-                "message": issue['message'], 
-                "severity": issue['severity'], 
+    if r_issues.status_code == 200:
+        issues_list = r_issues.json().get('issues', [])
+        for issue in issues_list:
+            all_findings.append({
+                "type": issue['type'],
+                "rule": issue['rule'],
+                "message": issue['message'],
+                "severity": issue['severity'],
                 "component": issue['component'],
                 "line": issue.get('line')
             })
     else:
-        print(f"API Error: {r.status_code} - {r.text}")
-        
-    return issues
+        print(f"Issues API Error: {r_issues.status_code} - {r_issues.text}")
+    r_hotspots = requests.get(
+        f"{SONAR_API_URL}/hotspots/search",
+        params={
+            "projectKey": PROJECT_KEY,
+            "branch": branch_name,
+            "ps": 500
+        },
+        auth=(SONAR_TOKEN, '')
+    )
+    if r_hotspots.status_code == 200:
+        hotspots_list = r_hotspots.json().get('hotspots', [])
+        for h in hotspots_list:
+            all_findings.append({
+                "type": "SECURITY_HOTSPOT",
+                "rule": h['ruleKey'],
+                "message": h['message'],
+                "severity": h.get('vulnerabilityProbability', 'UNKNOWN'),
+                "component": h['component'],
+                "line": h.get('line')
+            })
+    else:
+        print(f"Hotspots API Error: {r_hotspots.status_code} - {r_hotspots.text}")
+    return all_findings
 
 results = []
-if os.path.exists(WORKDIR): shutil.rmtree(WORKDIR)
+if os.path.exists(WORKDIR):
+    shutil.rmtree(WORKDIR)
 os.makedirs(WORKDIR)
 
 input_file = "chunk_20.jsonl"
@@ -141,19 +176,20 @@ if not os.path.exists(input_file):
 
 with open(input_file, "r") as f:
     for line in f:
-        try: entry = json.loads(line)
-        except: continue
+        try:
+            entry = json.loads(line)
+        except:
+            continue
         target_str = "vuln" if entry['target'] == 1 else "fixed"
         branch_name = f"analysis-{entry['idx']}-{target_str}"
         print(f"--- Processing {branch_name} ---")
         repo_dir = os.path.join(WORKDIR, branch_name)
-        
         if not os.path.exists(repo_dir):
-            try: Repo.clone_from(entry['project_url'], repo_dir)
-            except Exception as e: 
+            try:
+                Repo.clone_from(entry['project_url'], repo_dir)
+            except Exception as e:
                 print(f"Clone error: {e}")
                 continue
-                
         repo = Repo(repo_dir)
         try:
             repo.git.reset('--hard')
@@ -161,23 +197,23 @@ with open(input_file, "r") as f:
         except Exception as e:
             print(f"Checkout error: {e}")
             continue
-            
         full_path = os.path.join(repo_dir, entry['file_path'])
         source_dir = os.path.dirname(entry['file_path'])
-        if not source_dir: source_dir = "." # Si à la racine
-
+        if not source_dir:
+            source_dir = "."
         if patch_file(full_path, entry['func']):
             generate_compile_commands(repo_dir)
             if run_scanner(repo_dir, branch_name, source_dir):
-                issues = fetch_issues(branch_name)
+                findings = fetch_issues(branch_name)
                 results.append({
-                    "idx": entry['idx'], 
-                    "target": entry['target'], 
-                    "branch": branch_name, 
+                    "idx": entry['idx'],
+                    "target": entry['target'],
+                    "branch": branch_name,
                     "scanned_dir": source_dir,
-                    "issues": issues
+                    "issues": findings
                 })
-        
-        if os.path.exists(repo_dir): shutil.rmtree(repo_dir)
+        if os.path.exists(repo_dir):
+            shutil.rmtree(repo_dir)
 
-with open("final_results.json", "w") as f: json.dump(results, f, indent=2)
+with open("final_results.json", "w") as f:
+    json.dump(results, f, indent=2)
