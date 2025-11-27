@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import requests
 from git import Repo
+import sys
 
 SONAR_TOKEN = os.environ.get("SONAR_TOKEN")
 SONAR_ORG = os.environ.get("SONAR_ORG")
@@ -77,7 +78,6 @@ def generate_compile_commands(repo_path):
     return json_path
 
 def run_scanner(repo_path, branch_name, source_dir):
-    print(f"Running scanner on directory: {source_dir}")
     cmd = [
         "npx", "sonar-scanner",
         f"-Dsonar.organization={SONAR_ORG}",
@@ -101,7 +101,6 @@ def run_scanner(repo_path, branch_name, source_dir):
         return False
 
 def fetch_issues(branch_name):
-    print(f"Waiting for results on {branch_name}...")
     time.sleep(5)
     for _ in range(40):
         r = requests.get(
@@ -119,17 +118,12 @@ def fetch_issues(branch_name):
     all_findings = []
     r_issues = requests.get(
         f"{SONAR_API_URL}/issues/search",
-        params={
-            "componentKeys": PROJECT_KEY,
-            "branch": branch_name,
-            "types": "VULNERABILITY,BUG,CODE_SMELL",
-            "ps": 500
-        },
+        params={"componentKeys": PROJECT_KEY, "branch": branch_name,
+                "types": "VULNERABILITY,BUG,CODE_SMELL", "ps": 500},
         auth=(SONAR_TOKEN, '')
     )
     if r_issues.status_code == 200:
-        issues_list = r_issues.json().get('issues', [])
-        for issue in issues_list:
+        for issue in r_issues.json().get('issues', []):
             all_findings.append({
                 "type": issue['type'],
                 "rule": issue['rule'],
@@ -138,20 +132,13 @@ def fetch_issues(branch_name):
                 "component": issue['component'],
                 "line": issue.get('line')
             })
-    else:
-        print(f"Issues API Error: {r_issues.status_code} - {r_issues.text}")
     r_hotspots = requests.get(
         f"{SONAR_API_URL}/hotspots/search",
-        params={
-            "projectKey": PROJECT_KEY,
-            "branch": branch_name,
-            "ps": 500
-        },
+        params={"projectKey": PROJECT_KEY, "branch": branch_name, "ps": 500},
         auth=(SONAR_TOKEN, '')
     )
     if r_hotspots.status_code == 200:
-        hotspots_list = r_hotspots.json().get('hotspots', [])
-        for h in hotspots_list:
+        for h in r_hotspots.json().get('hotspots', []):
             all_findings.append({
                 "type": "SECURITY_HOTSPOT",
                 "rule": h['ruleKey'],
@@ -160,21 +147,24 @@ def fetch_issues(branch_name):
                 "component": h['component'],
                 "line": h.get('line')
             })
-    else:
-        print(f"Hotspots API Error: {r_hotspots.status_code} - {r_hotspots.text}")
     return all_findings
 
-results = []
+if len(sys.argv) > 1:
+    chunks_file = sys.argv[1]
+else:
+    chunks_file = "chunks/chunk_01.jsonl"
+
+if not os.path.exists(chunks_file):
+    print(f"{chunks_file} not found")
+    exit(1)
+
 if os.path.exists(WORKDIR):
     shutil.rmtree(WORKDIR)
 os.makedirs(WORKDIR)
 
-input_file = "chunks/chunk_01.jsonl"
-if not os.path.exists(input_file):
-    print(f"{input_file} not found")
-    exit(1)
+results = []
 
-with open(input_file, "r") as f:
+with open(chunks_file, "r") as f:
     for line in f:
         try:
             entry = json.loads(line)
@@ -198,9 +188,7 @@ with open(input_file, "r") as f:
             print(f"Checkout error: {e}")
             continue
         full_path = os.path.join(repo_dir, entry['file_path'])
-        source_dir = os.path.dirname(entry['file_path'])
-        if not source_dir:
-            source_dir = "."
+        source_dir = os.path.dirname(entry['file_path']) or "."
         if patch_file(full_path, entry['func']):
             generate_compile_commands(repo_dir)
             if run_scanner(repo_dir, branch_name, source_dir):
@@ -217,3 +205,4 @@ with open(input_file, "r") as f:
 
 with open("final_results.json", "w") as f:
     json.dump(results, f, indent=2)
+
