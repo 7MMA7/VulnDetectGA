@@ -171,7 +171,8 @@ with open(chunks_file, "r") as f:
         except:
             continue
         target_str = "vuln" if entry['target'] == 1 else "fixed"
-        branch_name = f"analysis-{entry['idx']}-{target_str}"
+        run_id = os.environ.get("GITHUB_RUN_ID", "local")
+        branch_name = f"analysis-{entry['idx']}-{target_str}-{run_id}"
         print(f"--- Processing {branch_name} ---")
         repo_dir = os.path.join(WORKDIR, branch_name)
         if not os.path.exists(repo_dir):
