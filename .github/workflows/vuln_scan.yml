@@ -38,7 +38,7 @@ jobs:
         run: python scripts/scan_sonarcloud.py ${{ github.event.inputs.chunk_file }}
 
       - name: Filter JSONL per file_path
-        run: python scripts/output_format.py ${{ github.event.inputs.chunk_file }} filtered_results.jsonl
+        run: python scripts/output_format.py final_results.json ${{ github.event.inputs.chunk_file }} filtered_results.jsonl
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
@@ -47,5 +47,6 @@ jobs:
           path: |
             final_results.json
             filtered_results.jsonl
+
 
 
