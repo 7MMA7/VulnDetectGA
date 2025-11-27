@@ -169,7 +169,7 @@ if os.path.exists(WORKDIR):
     shutil.rmtree(WORKDIR)
 os.makedirs(WORKDIR)
 
-input_file = "chunks/chunk_85.jsonl"
+input_file = "chunks/chunk_01.jsonl"
 if not os.path.exists(input_file):
     print(f"{input_file} not found")
     exit(1)
